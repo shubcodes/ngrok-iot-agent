@@ -82,19 +82,18 @@ This project implements an agent that dynamically creates, lists, and deletes ng
 ```
 ### Delete Tunnel
 
-**Request**: DELETE /tunnels/{url_part}
+**Request**: `DELETE /tunnels/{url_part}`
 
 **Description**: Delete a specified tunnel by the main part of the URL.
 
-Example Request:
+**Request Body** :
 
-sh
-Copy code
 curl -X DELETE https://82916d83f41a.ngrok.app/tunnels/2F334e095e9685
-Response:
 
+**Response**:
+```
 json
-Copy code
 {
     "detail": "Tunnel deleted"
 }
+```
