@@ -29,6 +29,18 @@ class TunnelManager:
         self.save_tunnels()
         return url
 
+    async def recreate_tunnel(self, url: str, protocol: str, forwards_to: str):
+        session = await self.initialize_session()
+        listener = await session.http_endpoint().listen()
+        listener.forward(forwards_to)
+        if listener.url() != url:
+            # If the URL does not match, we need to update the stored URL
+            del self.tunnels[url]
+            self.tunnels[listener.url()] = {"protocol": protocol, "forwards_to": forwards_to}
+            self.save_tunnels()
+        else:
+            self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to}
+
     def delete_tunnel(self, url: str):
         if url in self.tunnels:
             del self.tunnels[url]
@@ -89,14 +101,30 @@ async def setup_listener():
     return url
 
 
+async def recreate_saved_tunnels():
+    new_tunnels = {}
+    for url, details in list(tunnel_manager.tunnels.items()):
+        session = await tunnel_manager.initialize_session()
+        listener = await session.http_endpoint().listen()
+        listener.forward(details["forwards_to"])
+        new_url = listener.url()
+        new_tunnels[new_url] = details
+        if new_url != url:
+            del tunnel_manager.tunnels[url]
+    tunnel_manager.tunnels.update(new_tunnels)
+    tunnel_manager.save_tunnels()
+
+
 async def run_ngrok_listener():
     try:
         # Check if asyncio loop is already running. If so, piggyback on it to run the ngrok listener.
         running_loop = asyncio.get_running_loop()
-        url = await running_loop.create_task(setup_listener())
+        url = await setup_listener()
+        await recreate_saved_tunnels()
     except RuntimeError:
         # No existing loop is running, so we can run the ngrok listener on a new loop.
         url = await asyncio.run(setup_listener())
+        await asyncio.run(recreate_saved_tunnels())
     return url
 
 
