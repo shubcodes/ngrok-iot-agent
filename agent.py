@@ -1,104 +1,107 @@
-#!/usr/bin/env python
-
 import asyncio
-import logging
 import ngrok
-import os
-import threading
+import click
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, Any, Union
+import os
+from typing import List, Dict
+from fastapi import FastAPI, HTTPException
 
-CONFIG_FILE = "ngrok_tunnels.json"
+app = FastAPI()
+config_file = "ngrok_config.json"
 
-def load_config() -> Dict[str, Any]:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as file:
-            return json.load(file)
-    return {}
 
-def save_config(config: Dict[str, Any]) -> None:
-    with open(CONFIG_FILE, "w") as file:
-        json.dump(config, file, indent=4)
+class TunnelManager:
+    def __init__(self):
+        self.session = None
+        self.tunnels = {}
 
-class RequestHandler(BaseHTTPRequestHandler):
-    config = load_config()
-    session = None
+    async def initialize_session(self):
+        if self.session is None:
+            self.session = await ngrok.SessionBuilder().authtoken_from_env().connect()
+        return self.session
 
-    async def create_listener(self, protocol: str, forwards_to: str) -> ngrok.Listener:
-        if not self.session:
-            self.session = await ngrok.SessionBuilder().authtoken_from_env().metadata("Dynamic Tunnel Creator").connect()
-        
-        if protocol == "http":
-            listener = await self.session.http_endpoint().forwards_to(forwards_to).metadata("example http listener metadata").listen()
+    async def create_tunnel(self, protocol: str, forwards_to: str) -> str:
+        session = await self.initialize_session()
+        listener = await session.http_endpoint().listen()
+        listener.forward(forwards_to)
+        url = listener.url()
+        self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to}
+        self.save_tunnels()
+        return url
+
+    def delete_tunnel(self, url: str):
+        if url in self.tunnels:
+            del self.tunnels[url]
+            self.save_tunnels()
         else:
-            listener = await self.session.tcp_endpoint().forwards_to(forwards_to).metadata("example tcp listener metadata").listen()
-        
-        self.config[listener.url()] = {"metadata": listener.metadata(), "protocol": protocol, "forwards_to": forwards_to}
-        save_config(self.config)
-        
-        return listener
+            raise HTTPException(status_code=404, detail="Tunnel not found")
 
-    async def handle_create_tunnel(self, protocol: str, forwards_to: str):
-        listener = await self.create_listener(protocol, forwards_to)
-        self.respond(200, {"url": listener.url(), "metadata": listener.metadata(), "protocol": protocol})
+    def list_tunnels(self) -> List[Dict[str, str]]:
+        return [{"url": url, **details} for url, details in self.tunnels.items()]
 
-    def do_GET(self):
-        if self.path == "/tunnels":
-            self.respond(200, self.config)
+    def save_tunnels(self):
+        with open(config_file, 'w') as file:
+            json.dump(self.tunnels, file)
 
-    def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        request = json.loads(post_data)
+    def load_tunnels(self):
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as file:
+                self.tunnels = json.load(file)
 
-        protocol = request.get("protocol")
-        forwards_to = request.get("forwards_to")
 
-        if protocol and forwards_to:
-            asyncio.run(self.handle_create_tunnel(protocol, forwards_to))
-        else:
-            self.respond(400, {"error": "Invalid request. 'protocol' and 'forwards_to' are required."})
+tunnel_manager = TunnelManager()
+tunnel_manager.load_tunnels()
 
-    def do_DELETE(self):
-        path_parts = self.path.split("/")
-        if len(path_parts) == 3 and path_parts[1] == "tunnels":
-            url = path_parts[2]
-            if url in self.config:
-                del self.config[url]
-                save_config(self.config)
-                self.respond(200, {"message": f"Tunnel {url} deleted."})
-            else:
-                self.respond(404, {"error": "Tunnel not found."})
-        else:
-            self.respond(400, {"error": "Invalid request."})
 
-    def respond(self, status: int, data: Dict[str, Union[str, Dict]]):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+@app.get("/tunnels", response_model=List[Dict[str, str]])
+def list_tunnels():
+    return tunnel_manager.list_tunnels()
+
+
+@app.post("/tunnels")
+async def create_tunnel(tunnel: Dict[str, str]):
+    protocol = tunnel.get("protocol", "http")
+    forwards_to = tunnel["forwards_to"]
+    url = await tunnel_manager.create_tunnel(protocol, forwards_to)
+    return {"url": url, "protocol": protocol, "forwards_to": forwards_to}
+
+
+@app.delete("/tunnels/{url}")
+def delete_tunnel(url: str):
+    tunnel_manager.delete_tunnel(url)
+    return {"detail": "Tunnel deleted"}
+
 
 async def setup_listener():
-    server_address = ('localhost', 8080)
-    httpd = HTTPServer(server_address, RequestHandler)
-    logging.info("Starting HTTP server on port 8080...")
-    
-    session = await ngrok.SessionBuilder().authtoken_from_env().metadata("API Server").connect()
-    listener = await session.http_endpoint().forwards_to("localhost:8080").metadata("API Server Endpoint").listen()
-    logging.info(f"ngrok tunnel opened at {listener.url()}")
+    listen = "localhost:8000"
+    session = await ngrok.SessionBuilder().authtoken_from_env().connect()
+    listener = await (
+        session.http_endpoint()
+        .listen()
+    )
+    url = listener.url()
+    click.secho(
+        f"API is exposed at: {url}",
+        fg="green",
+        bold=True,
+    )
+    listener.forward(listen)
+    return url
 
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
-    # Keep the async function alive to maintain the ngrok session
-    while True:
-        await asyncio.sleep(1)
+async def run_ngrok_listener():
+    try:
+        # Check if asyncio loop is already running. If so, piggyback on it to run the ngrok listener.
+        running_loop = asyncio.get_running_loop()
+        url = await running_loop.create_task(setup_listener())
+    except RuntimeError:
+        # No existing loop is running, so we can run the ngrok listener on a new loop.
+        url = await asyncio.run(setup_listener())
+    return url
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    try:
-        running_loop = asyncio.get_running_loop()
-        running_loop.create_task(setup_listener())
-    except RuntimeError:
-        asyncio.run(setup_listener())
+    import uvicorn
+    url = asyncio.run(run_ngrok_listener())
+    print(f"Ngrok tunnel URL: {url}")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
