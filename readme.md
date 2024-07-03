@@ -91,8 +91,7 @@ This project implements an agent that dynamically creates, lists, and deletes ng
 curl -X DELETE https://82916d83f41a.ngrok.app/tunnels/2F334e095e9685
 
 **Response**:
-```
-json
+```json
 {
     "detail": "Tunnel deleted"
 }
