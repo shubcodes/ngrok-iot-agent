@@ -5,6 +5,7 @@ import json
 import os
 from typing import List, Dict
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 config_file = "ngrok_config.json"
@@ -20,30 +21,38 @@ class TunnelManager:
             self.session = await ngrok.SessionBuilder().authtoken_from_env().connect()
         return self.session
 
-    async def create_tunnel(self, protocol: str, forwards_to: str) -> str:
+    async def create_tunnel(self, protocol: str, forwards_to: str, domain: str = None) -> str:
         session = await self.initialize_session()
-        listener = await session.http_endpoint().listen()
+        listener = session.http_endpoint()
+        if domain:
+            listener = listener.domain(domain)
+        listener = await listener.listen()
         listener.forward(forwards_to)
         url = listener.url()
-        self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to}
+        self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
         self.save_tunnels()
         return url
 
-    async def recreate_tunnel(self, url: str, protocol: str, forwards_to: str):
+    async def recreate_tunnel(self, url: str, protocol: str, forwards_to: str, domain: str = None):
         session = await self.initialize_session()
-        listener = await session.http_endpoint().listen()
+        listener = session.http_endpoint()
+        if domain:
+            listener = listener.domain(domain)
+        listener = await listener.listen()
         listener.forward(forwards_to)
         if listener.url() != url:
             # If the URL does not match, we need to update the stored URL
             del self.tunnels[url]
-            self.tunnels[listener.url()] = {"protocol": protocol, "forwards_to": forwards_to}
+            self.tunnels[listener.url()] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
             self.save_tunnels()
         else:
-            self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to}
+            self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
 
-    def delete_tunnel(self, url: str):
-        if url in self.tunnels:
-            del self.tunnels[url]
+    def delete_tunnel(self, url_part: str):
+        # Find the full URL matching the provided part
+        full_url = next((url for url in self.tunnels if url_part in url), None)
+        if full_url:
+            del self.tunnels[full_url]
             self.save_tunnels()
         else:
             raise HTTPException(status_code=404, detail="Tunnel not found")
@@ -74,23 +83,22 @@ def list_tunnels():
 async def create_tunnel(tunnel: Dict[str, str]):
     protocol = tunnel.get("protocol", "http")
     forwards_to = tunnel["forwards_to"]
-    url = await tunnel_manager.create_tunnel(protocol, forwards_to)
-    return {"url": url, "protocol": protocol, "forwards_to": forwards_to}
+    domain = tunnel.get("domain")
+    url = await tunnel_manager.create_tunnel(protocol, forwards_to, domain)
+    return {"url": url, "protocol": protocol, "forwards_to": forwards_to, "domain": domain}
 
 
-@app.delete("/tunnels/{url}")
-def delete_tunnel(url: str):
-    tunnel_manager.delete_tunnel(url)
-    return {"detail": "Tunnel deleted"}
+@app.delete("/tunnels/{url_part}")
+def delete_tunnel(url_part: str):
+    tunnel_manager.delete_tunnel(url_part)
+    return JSONResponse(content={"detail": "Tunnel deleted"}, status_code=200)
 
 
 async def setup_listener():
     listen = "localhost:8000"
+    domain = "shub-reserved.ngrok.io"  # Replace with your reserved domain ****IMPORTANT****
     session = await ngrok.SessionBuilder().authtoken_from_env().connect()
-    listener = await (
-        session.http_endpoint()
-        .listen()
-    )
+    listener = await session.http_endpoint().domain(domain).listen()
     url = listener.url()
     click.secho(
         f"API is exposed at: {url}",
@@ -104,8 +112,12 @@ async def setup_listener():
 async def recreate_saved_tunnels():
     new_tunnels = {}
     for url, details in list(tunnel_manager.tunnels.items()):
+        domain = details.get("domain")
         session = await tunnel_manager.initialize_session()
-        listener = await session.http_endpoint().listen()
+        listener = session.http_endpoint()
+        if domain:
+            listener = listener.domain(domain)
+        listener = await listener.listen()
         listener.forward(details["forwards_to"])
         new_url = listener.url()
         new_tunnels[new_url] = details
