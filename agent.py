@@ -3,12 +3,13 @@ import ngrok
 import click
 import json
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 config_file = "ngrok_config.json"
+policy_file = "test.json"  # Path to the default policy file
 
 
 class TunnelManager:
@@ -21,21 +22,29 @@ class TunnelManager:
             self.session = await ngrok.SessionBuilder().authtoken_from_env().connect()
         return self.session
 
-    async def create_tunnel(self, protocol: str, forwards_to: str, domain: str = None) -> str:
+    async def load_policy(self, policy: Dict[str, Any] = None) -> str:
+        if policy is None:
+            with open(policy_file) as f:
+                policy = json.load(f)
+        return json.dumps(policy)
+
+    async def create_tunnel(self, protocol: str, forwards_to: str, domain: str = None, policy: Dict[str, Any] = None) -> str:
         session = await self.initialize_session()
-        listener = session.http_endpoint()
+        policy_str = await self.load_policy(policy)
+        listener = session.http_endpoint().policy(policy_str)
         if domain:
             listener = listener.domain(domain)
         listener = await listener.listen()
         listener.forward(forwards_to)
         url = listener.url()
-        self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
+        self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain, "policy": policy_str}
         self.save_tunnels()
         return url
 
     async def recreate_tunnel(self, url: str, protocol: str, forwards_to: str, domain: str = None):
         session = await self.initialize_session()
-        listener = session.http_endpoint()
+        policy_str = await self.load_policy(self.tunnels[url].get("policy"))
+        listener = session.http_endpoint().policy(policy_str)
         if domain:
             listener = listener.domain(domain)
         listener = await listener.listen()
@@ -43,10 +52,10 @@ class TunnelManager:
         if listener.url() != url:
             # If the URL does not match, we need to update the stored URL
             del self.tunnels[url]
-            self.tunnels[listener.url()] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
+            self.tunnels[listener.url()] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain, "policy": policy_str}
             self.save_tunnels()
         else:
-            self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain}
+            self.tunnels[url] = {"protocol": protocol, "forwards_to": forwards_to, "domain": domain, "policy": policy_str}
 
     def delete_tunnel(self, url_part: str):
         # Find the full URL matching the provided part
@@ -80,12 +89,13 @@ def list_tunnels():
 
 
 @app.post("/tunnels")
-async def create_tunnel(tunnel: Dict[str, str]):
+async def create_tunnel(tunnel: Dict[str, Any]):
     protocol = tunnel.get("protocol", "http")
     forwards_to = tunnel["forwards_to"]
     domain = tunnel.get("domain")
-    url = await tunnel_manager.create_tunnel(protocol, forwards_to, domain)
-    return {"url": url, "protocol": protocol, "forwards_to": forwards_to, "domain": domain}
+    policy = tunnel.get("policy")  # Policy can be passed in the request body
+    url = await tunnel_manager.create_tunnel(protocol, forwards_to, domain, policy)
+    return {"url": url, "protocol": protocol, "forwards_to": forwards_to, "domain": domain, "policy": policy}
 
 
 @app.delete("/tunnels/{url_part}")
@@ -98,7 +108,8 @@ async def setup_listener():
     listen = "localhost:8000"
     domain = "shub-reserved.ngrok.io"  # Replace with your reserved domain ****IMPORTANT****
     session = await ngrok.SessionBuilder().authtoken_from_env().connect()
-    listener = await session.http_endpoint().domain(domain).listen()
+    policy = await tunnel_manager.load_policy()
+    listener = await session.http_endpoint().policy(policy).domain(domain).listen()
     url = listener.url()
     click.secho(
         f"API is exposed at: {url}",
@@ -114,7 +125,8 @@ async def recreate_saved_tunnels():
     for url, details in list(tunnel_manager.tunnels.items()):
         domain = details.get("domain")
         session = await tunnel_manager.initialize_session()
-        listener = session.http_endpoint()
+        policy_str = await tunnel_manager.load_policy(details.get("policy"))
+        listener = session.http_endpoint().policy(policy_str)
         if domain:
             listener = listener.domain(domain)
         listener = await listener.listen()
