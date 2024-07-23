@@ -80,6 +80,42 @@ This project implements an agent that dynamically creates, lists, and deletes ng
     "domain": "your-reserved-domain.ngrok.io"
 }
 ```
+
+### Create Tunnel With Policy
+**Request**: `POST /tunnels`
+
+**Description**: Create a new ngrok tunnel.
+
+**Request Body**:
+
+```json
+{
+  "protocol": "http",
+  "forwards_to": "localhost:8080",
+  "domain": "your-reserved-domain.ngrok.io" ,
+  "policy": {
+    "inbound": [],
+    "outbound": [
+      {
+        "expressions": [],
+        "name": "Add headers to requests",
+        "actions": [
+          {
+            "type": "add-headers",
+            "config": {
+              "headers": {
+                "is-ngrok": "1"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+
+```
+
 ### Delete Tunnel
 
 **Request**: `DELETE /tunnels/{url_part}`
