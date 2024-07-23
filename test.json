@@ -1,0 +1,19 @@
+{
+  "inbound": [],
+  "outbound": [
+    {
+      "expressions": [],
+      "name": "Add headers to requests",
+      "actions": [
+        {
+          "type": "add-headers",
+          "config": {
+            "headers": {
+              "is-ngrok": "0000000000"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
